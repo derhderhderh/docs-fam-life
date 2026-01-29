@@ -1,19 +1,26 @@
 import { NextRequest, NextResponse } from "next/server"
-import { initializeApp, getApps, cert } from "firebase-admin/app"
-import { getFirestore } from "firebase-admin/firestore"
+import { initializeApp, getApps, cert, type App } from "firebase-admin/app"
+import { getFirestore, type Firestore } from "firebase-admin/firestore"
 
-// Initialize Firebase Admin
-if (!getApps().length) {
-  initializeApp({
-    credential: cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-    }),
-  })
+// Lazy initialization of Firebase Admin
+let adminApp: App | null = null
+let adminFirestore: Firestore | null = null
+
+function getAdminDb(): Firestore {
+  if (!adminFirestore) {
+    if (!getApps().length) {
+      adminApp = initializeApp({
+        credential: cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+        }),
+      })
+    }
+    adminFirestore = getFirestore()
+  }
+  return adminFirestore
 }
-
-const adminDb = getFirestore()
 
 // This endpoint should be called by a cron job (e.g., Vercel Cron) daily
 export async function GET(request: NextRequest) {
@@ -25,6 +32,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const now = new Date()
+    const db = getAdminDb()
     const results = {
       trialEndingWarnings: 0,
       trialsExpired: 0,
@@ -40,7 +48,7 @@ export async function GET(request: NextRequest) {
       const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0))
       const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999))
 
-      const trialEndingFamilies = await adminDb
+      const trialEndingFamilies = await db
         .collection("families")
         .where("accountStatus", "==", "trial")
         .where("trialEndsAt", ">=", startOfDay)
@@ -51,7 +59,7 @@ export async function GET(request: NextRequest) {
         const family = familyDoc.data()
         
         // Get family manager
-        const managerSnapshot = await adminDb
+        const managerSnapshot = await db
           .collection("users")
           .where("familyId", "==", familyDoc.id)
           .where("role", "==", "family_manager")
@@ -79,7 +87,7 @@ export async function GET(request: NextRequest) {
     }
 
     // 2. Find and lock expired trials
-    const expiredTrialFamilies = await adminDb
+    const expiredTrialFamilies = await db
       .collection("families")
       .where("accountStatus", "==", "trial")
       .where("trialEndsAt", "<=", now)
@@ -89,7 +97,7 @@ export async function GET(request: NextRequest) {
       const family = familyDoc.data()
       
       // Check if they have an active subscription
-      const subscriptionSnapshot = await adminDb
+      const subscriptionSnapshot = await db
         .collection("subscriptions")
         .where("familyId", "==", familyDoc.id)
         .where("status", "in", ["active", "trialing"])
@@ -101,7 +109,7 @@ export async function GET(request: NextRequest) {
         const deletionDate = new Date(now)
         deletionDate.setDate(deletionDate.getDate() + 30)
 
-        await adminDb.collection("families").doc(familyDoc.id).update({
+        await db.collection("families").doc(familyDoc.id).update({
           accountStatus: "locked",
           trialEndedAt: now,
           accountLockedAt: now,
@@ -109,7 +117,7 @@ export async function GET(request: NextRequest) {
         })
 
         // Get family manager
-        const managerSnapshot = await adminDb
+        const managerSnapshot = await db
           .collection("users")
           .where("familyId", "==", familyDoc.id)
           .where("role", "==", "family_manager")
@@ -144,7 +152,7 @@ export async function GET(request: NextRequest) {
       const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0))
       const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999))
 
-      const deletionWarningFamilies = await adminDb
+      const deletionWarningFamilies = await db
         .collection("families")
         .where("accountStatus", "==", "locked")
         .where("scheduledDeletionAt", ">=", startOfDay)
@@ -155,7 +163,7 @@ export async function GET(request: NextRequest) {
         const family = familyDoc.data()
         
         // Get family manager
-        const managerSnapshot = await adminDb
+        const managerSnapshot = await db
           .collection("users")
           .where("familyId", "==", familyDoc.id)
           .where("role", "==", "family_manager")
@@ -183,7 +191,7 @@ export async function GET(request: NextRequest) {
     }
 
     // 4. Delete families that have passed their deletion date
-    const deletionFamilies = await adminDb
+    const deletionFamilies = await db
       .collection("families")
       .where("accountStatus", "==", "locked")
       .where("scheduledDeletionAt", "<=", now)
@@ -194,7 +202,7 @@ export async function GET(request: NextRequest) {
       const familyId = familyDoc.id
 
       // Get family manager for notification
-      const managerSnapshot = await adminDb
+      const managerSnapshot = await db
         .collection("users")
         .where("familyId", "==", familyId)
         .where("role", "==", "family_manager")
@@ -212,7 +220,7 @@ export async function GET(request: NextRequest) {
 
       // Delete all family data
       // 1. Delete documents
-      const documentsSnapshot = await adminDb
+      const documentsSnapshot = await db
         .collection("documents")
         .where("familyId", "==", familyId)
         .get()
@@ -221,7 +229,7 @@ export async function GET(request: NextRequest) {
       }
 
       // 2. Delete trusted contacts
-      const contactsSnapshot = await adminDb
+      const contactsSnapshot = await db
         .collection("trusted_contacts")
         .where("familyId", "==", familyId)
         .get()
@@ -230,7 +238,7 @@ export async function GET(request: NextRequest) {
       }
 
       // 3. Delete emergency events
-      const emergencySnapshot = await adminDb
+      const emergencySnapshot = await db
         .collection("emergency_events")
         .where("familyId", "==", familyId)
         .get()
@@ -239,7 +247,7 @@ export async function GET(request: NextRequest) {
       }
 
       // 4. Delete audit logs
-      const auditSnapshot = await adminDb
+      const auditSnapshot = await db
         .collection("audit_logs")
         .where("familyId", "==", familyId)
         .get()
@@ -248,7 +256,7 @@ export async function GET(request: NextRequest) {
       }
 
       // 5. Delete subscriptions
-      const subscriptionSnapshot = await adminDb
+      const subscriptionSnapshot = await db
         .collection("subscriptions")
         .where("familyId", "==", familyId)
         .get()
@@ -257,7 +265,7 @@ export async function GET(request: NextRequest) {
       }
 
       // 6. Delete users (note: Firebase Auth users should be deleted separately)
-      const usersSnapshot = await adminDb
+      const usersSnapshot = await db
         .collection("users")
         .where("familyId", "==", familyId)
         .get()
@@ -266,7 +274,7 @@ export async function GET(request: NextRequest) {
       }
 
       // 7. Update family to deleted status (keep minimal record)
-      await adminDb.collection("families").doc(familyId).update({
+      await db.collection("families").doc(familyId).update({
         accountStatus: "deleted",
         deletedAt: now,
         name: "[Deleted]",
